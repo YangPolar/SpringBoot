@@ -1,0 +1,14 @@
+spring:
+  batch:
+    jdbc:
+      initialize-schema: always
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/coupon?autoReconnect=true&useUnicode=true&characterEncoding=utf8&useSSL=false&zeroDateTimeBehavior=convertToNull&serverTimezone=UTC
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 3
+      connection-test-query: SELECT 1
+      connection-timeout: 30000

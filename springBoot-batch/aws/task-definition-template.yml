@@ -1,0 +1,172 @@
+#
+# ECSタスク定義
+#
+# 本ファイルはAP環境に応じて適宜修正する。
+# 以下は、テンプレートで利用されている置換キーワード。
+# Github Actionsの環境変数定義、（環境名）.envで指定されたもので置換される。
+# 独自のものを定義した場合、（環境名）.envなどに記載する。
+#
+# | 置換キーワード     | 内容                                                                  |
+# |:-------------------|:----------------------------------------------------------------------|
+# | FAMILY             | ECSのタスク定義名                                                     |
+# | TASK_ROLE_ARN      | タスクロールARN。コンテナ内に割り当てる。                             |
+# | EXECUTION_ROLE_ARN | 実行タスクロールARN。ホスト側に割り当てる。ECRのpullなど。            |
+# | APP_CONTAINER_NAME | タスク定義に含まれるコンテナのコンテナ名。インフラ構築時に決定される。|
+# | ENV                | 環境名（dev/lab/inte/stg/ins/prod）                                   |
+# | AWS_REGION         | AWSリージョン名（例:ap-northeast-1）                                  |
+# | AWS_ACCOUNT        | AWSアカウント名                                                       |
+# | SID                | サービスID。インフラ構築時に決定される。                              |
+# | AWSLOGS_GROUP      | Cloudwatch Logsのロググループ名。インフラ構築時に決定される。         |
+#
+
+# タスク定義で指定する名前のようなもの
+family: ${FAMILY}
+# タスク（コンテナ）自体が利用するIAMロール。アプリケーションからのS3などのアクセスはこちら。
+taskRoleArn: ${TASK_ROLE_ARN}
+# ECS自体が利用するIAMロール。Imageのpull、CloudWatchへのログ書き込みはこちら。
+executionRoleArn: ${EXECUTION_ROLE_ARN}
+# ネットワークモード Fargateの場合はawsvpc固定。
+networkMode: awsvpc
+# タスクで使用する起動タイプ
+requiresCompatibilities:
+  - FARGATE
+#
+# |CPU | Memory                           |
+# |:---|:---------------------------------|
+# |256 |512/1024/2048                     |
+# |512 |1024/2048/3072/4096               |
+# |1024|2048/3072/4096/5120/6144/7168/8192|
+# |2048|4096-16384(1024刻み)              |
+# |4096|8192-30720(1024刻み)              |
+# タスクに適用される CPU ユニットのハード制限。
+cpu: "${CPU}"
+# タスクに適用されるメモリのハード制限 (MiB 単位)。
+memory: "${MEMORY}"
+
+###
+# コンテナ設定
+###
+containerDefinitions:
+# Applicationコンテナ------------------------------------
+  - name: ${APP_CONTAINER_NAME}
+    # imageのURL、タグ名はGithub Actionのアクション:aws-actions/amazon-ecs-render-task-definitionで上書きされるためダミーの値とする。
+    image: "342274811455.dkr.ecr.ap-northeast-1.amazonaws.com/infrastructure/base:initial-web-application-spring-boot-20210129-04"
+    # コンテナに適用するメモリ制限の量（Mib単位）
+    memory: ${APPLICATION_MEMORY}
+    # コンテナに適用するソフトメモリ制限の量（Mib単位）
+    memoryReservation: ${APPLICATION_MEMORY}
+    # ポートマッピング定義。Spring Actuator用に8081ポートを用意する。
+    portMappings:
+      - { containerPort: 8080, hostPort: 8080, protocol: "tcp" }
+      - { containerPort: 8081, hostPort: 8081, protocol: "tcp" }
+    # ヘルスチェック。これを指定するとコンテナ起動後ヘルスチェックが正常に応答を返すとサービスとして組み込まれる。指定しない場合、コンテナ起動と同時にサービスに組み込まれるため、起動処理中のアクセスなどの問題が発生する。
+    # 以下は、Spring Boot Actuatorのヘルスチェックを利用する。
+    # TODO healthCheckはコンテナ内で実行されるが、jib標準のベースイメージにはcurlが含まれないため動作しない。別途対策をする。
+    healthCheck:
+      command:
+        - "CMD-SHELL"
+        - "curl -f http://localhost:8081/actuator/health || exit 1"
+      interval: 30
+      timeout: 5
+      retries: 3
+      startPeriod: 60
+    # CPUユニットの数（EC2のvCPUが1相当の場合は、ここでは1024とする）
+    cpu: "${APPLICATION_CPU}"
+    # コンテナが必須かの指定。これがtrueの場合、コンテナが停止すると、他のコンテナ（サイドカー）も停止する。
+    essential: true
+    # コンテナに渡す環境変数
+    environment:
+      - { name: "SPRING_PROFILES_ACTIVE", value: "${ENV}" }
+      - { name: "AWS_REGION", value: "${AWS_REGION}" }
+      - { name: "COUPON_DATABASE", value: "${COUPON_DATABASE}" }
+      - { name: "JAVA_TOOL_OPTIONS", value: "${APPLICATION_JAVA_TOOL_OPTIONS} ${APPLICATION_JAVA_SYSTEM_PARAMETERS}" }
+      - { name: "APPLICATION_TAG", value: "${APPLICATION_TAG}" }
+    # コンテナに渡すパラメータストアの値の定義。環境変数で渡される。valueFromにパラメータストのARNが必要となる。
+    secrets:
+      - { name: "DB_ENDPOINT_WRITE", valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/RDS_ENDPOINT" }
+      - { name: "SPRING_DATASOURCE_USERNAME", valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/${RDS_USER_coupon}" }
+      - { name: "SPRING_DATASOURCE_PASSWORD", valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/${RDS_PASSWORD_coupon}" }
+      - { name: "COGNITO_USER_POOL_ID", valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_COMMON_PATH}/COGNITO_USER_POOL_ID" }
+      - { name: "COGNITO_CLIENT_ID", valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_COMMON_PATH}/COGNITO_CLIENT_ID" }
+      - { name: "REDIS_ENDPOINT",    valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/REDIS_ENDPOINT" }
+      - { name: "SES_REGION",    valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/${SES_REGION}" }
+      - { name: "SES_FROM_EMAIL",    valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/${SES_FROM_EMAIL}" }
+    # コンテナのログ設定
+    logConfiguration:
+      logDriver: awsfirelens
+    # コンテナで設定する ulimits のリスト。"name": "core"|"cpu"|"data"|"fsize"|"locks"|"memlock"|"msgqueue"|"nice"|"nofile"|"nproc"|"rss"|"rtprio"|"rttime"|"sigpending"|"stack",
+    ulimits: # nofile/nprocの上限を到達しない値まであげる。同時にこれだけの数のファイルをオープンはしないし、スレッドはアプリケーションで調整する。
+      - name: "nofile"
+        softLimit: 65536
+        hardLimit: 65536
+      - name: "nproc"
+        softLimit: 8192
+        hardLimit: 8192
+
+# Applicationコンテナ------------------------------------
+
+# log-routerコンテナ------------------------------------
+## ログ基盤(OpenSearch)、CloudWatchLogs、S3へのログ転送を行う。
+  - name: log-router
+    image: 342274811455.dkr.ecr.ap-northeast-1.amazonaws.com/infra/log-router:v2.0.0
+    essential: true
+    environment:
+      - name: CONTAINER_NAME
+        value: ${APP_CONTAINER_NAME}
+      - name: REGION_NAME
+        value: ${AWS_REGION}
+      - name: LOG_GROUP_NAME
+        value: ${AWSLOGS_GROUP}
+      - name: LOG_STREAM_PREFIX
+        value: app
+      - name: LOG_BUCKET_NAME
+        value: ${LOG_ROUTER_LOG_BUCKET_NAME}
+      - name: TOTAL_FILE_SIZE
+        value: 10M
+      - name: UPLOAD_TIMEOUT
+        value: 3m
+      - name: S3_KEY_FORMAT
+        value: ${AWSLOGS_GROUP}/%Y/%m/%d/%H/%M/%S
+      - name: TIME_KEY
+        value: "${TIME_KEY}"
+      - name: OPENSEARCH_HOST
+        value: ${OPENSEARCH_HOST}
+      - name: INDEX_PREFIX
+        value: ${INDEX_PREFIX}
+    firelensConfiguration:
+      type: fluentbit
+      options:
+        enable-ecs-log-metadata: "true"
+        config-file-type: file
+        config-file-value: /fluent-bit/etc/fluent-bit-custom.conf
+    # log-router自体のログ設定
+    logConfiguration:
+      logDriver: awslogs
+      options:
+        awslogs-group: ${AWSLOGS_GROUP}/log-router
+        awslogs-region: ${AWS_REGION}
+        awslogs-stream-prefix: firelens
+    user: "0"
+    memory: 128
+    memoryReservation: 128
+    cpu: 256 # AppMesh/X-Rayを使用する場合は320にする
+# log-routerコンテナ------------------------------------
+
+# ADOTCollectorコンテナ------------------------------------
+## APMへのアプリケーションメトリクスを収集する
+## APMを使用しない場合は本コンテナ定義は不要なため、セクションを削除する
+  - name: collector
+    image: 342274811455.dkr.ecr.ap-northeast-1.amazonaws.com/infra/aws-otel-collector:v0.16.0
+    essential: true
+    secrets:
+      - { name: "AOT_CONFIG_CONTENT", valueFrom: "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT}:parameter/${ENV}/${SID}/${INFRA_PATH}/otel_custom_config_${SUBSID}"}
+    logConfiguration:
+      logDriver: awslogs
+      options:
+        awslogs-group: ${AWSLOGS_GROUP}/adot-collector
+        awslogs-region: ${AWS_REGION}
+        awslogs-stream-prefix: otel-collector
+    memory: 64
+    memoryReservation: 64
+    cpu: 64
+# ADOTCollectorコンテナ------------------------------------
